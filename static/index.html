@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LOCKIN</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #050505;
+      color: #f5f5f5;
+      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select { font: inherit; }
+    .shell { max-width: 1480px; margin: 0 auto; padding: 28px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+    h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: 0; }
+    .muted { color: #9ca3af; }
+    .grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
+    .sidebar { display: grid; gap: 16px; align-items: start; }
+    .content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 16px; align-items: start; }
+    .panel { border: 1px solid #2b2b2b; background: #0b0b0b; border-radius: 8px; }
+    .panel h2 { margin: 0; padding: 14px 16px; border-bottom: 1px solid #242424; font-size: 14px; font-weight: 600; }
+    .panel-body { padding: 16px; }
+    .status { display: grid; gap: 10px; }
+    .status-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid #1f1f1f; }
+    .status-row.wide { display: grid; gap: 4px; }
+    .status-row:last-child { border-bottom: 0; }
+    .value { color: #fff; text-align: right; word-break: break-word; }
+    .status-row.wide .value { text-align: left; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+    button {
+      min-height: 36px;
+      border: 1px solid #3a3a3a;
+      color: #f5f5f5;
+      background: #111;
+      border-radius: 6px;
+      padding: 0 12px;
+      cursor: pointer;
+    }
+    button:hover { background: #181818; border-color: #666; }
+    button.primary { background: #f5f5f5; color: #050505; border-color: #f5f5f5; }
+    button.primary:hover { background: #dcdcdc; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    label.toggle { display: flex; align-items: center; gap: 10px; margin-top: 14px; color: #e5e5e5; }
+    input[type="checkbox"] { width: 16px; height: 16px; accent-color: #fff; }
+    .field { display: grid; gap: 7px; margin-top: 14px; color: #e5e5e5; }
+    .field span { color: #9ca3af; font-size: 12px; }
+    select {
+      min-height: 36px;
+      border: 1px solid #3a3a3a;
+      color: #f5f5f5;
+      background: #111;
+      border-radius: 6px;
+      padding: 0 10px;
+    }
+    select:disabled { opacity: .45; }
+    .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 8px; }
+    .maps { display: grid; gap: 8px; }
+    .map-help { margin: 0 0 12px; color: #9ca3af; font-size: 13px; }
+    .map-group { display: grid; gap: 8px; }
+    .map-group + .map-group { margin-top: 14px; padding-top: 12px; border-top: 1px solid #242424; }
+    .map-group h3 {
+      margin: 0;
+      color: #e5e5e5;
+      font-size: 12px;
+      font-weight: 650;
+      text-transform: uppercase;
+    }
+    .map-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+    .agent,
+    .map {
+      min-height: 58px;
+      border: 1px solid #2b2b2b;
+      background: #090909;
+      border-radius: 8px;
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      text-align: left;
+    }
+    .map { min-height: 50px; padding: 8px; }
+    .agent.selected,
+    .map.selected { outline: 2px solid #f5f5f5; border-color: #f5f5f5; }
+    .agent img { width: 34px; height: 34px; object-fit: contain; flex: 0 0 auto; }
+    .map img { width: 42px; height: 32px; object-fit: cover; border-radius: 4px; background: #111; }
+    .agent strong { display: block; font-size: 13px; font-weight: 650; }
+    .map strong { display: block; font-size: 13px; font-weight: 650; }
+    .agent span { display: block; min-width: 0; color: #8b8b8b; font-size: 12px; }
+    .agent strong,
+    .agent span span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .role-separator {
+      grid-column: 1 / -1;
+      margin-top: 8px;
+      padding: 8px 0 2px;
+      border-top: 1px solid #2b2b2b;
+      color: #e5e5e5;
+      font-size: 12px;
+      font-weight: 650;
+      text-transform: uppercase;
+    }
+    .log {
+      display: grid;
+      gap: 7px;
+      max-height: 260px;
+      overflow: auto;
+      padding-right: 4px;
+      scrollbar-color: #3a3a3a #0b0b0b;
+      scrollbar-width: thin;
+    }
+    .log::-webkit-scrollbar { width: 8px; }
+    .log::-webkit-scrollbar-track { background: #0b0b0b; border-radius: 999px; }
+    .log::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 999px; }
+    .log::-webkit-scrollbar-thumb:hover { background: #555; }
+    .event { border: 1px solid #242424; border-radius: 6px; padding: 8px; color: #d4d4d4; background: #080808; }
+    .event small { color: #858585; display: block; margin-bottom: 2px; }
+    .event.info { border-color: #2f3a46; background: #080b0f; }
+    .event.info small { color: #8fb3d9; }
+    .event.warn { border-color: #5a4522; background: #120e07; }
+    .event.warn small { color: #e0b15f; }
+    .event.error { border-color: #5a2626; background: #130808; }
+    .event.error small { color: #e07b7b; }
+    .empty-log { color: #6b7280; font-size: 13px; padding: 4px 0; }
+    @media (max-width: 840px) {
+      .shell { padding: 16px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .grid { grid-template-columns: 1fr; }
+      .content { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <h1>LOCKIN</h1>
+        <div class="muted">Local Valorant agent lock dashboard</div>
+      </div>
+      <div class="muted" id="saved">Idle</div>
+    </header>
+    <section class="grid">
+      <aside class="sidebar">
+        <section class="panel">
+          <h2>Runtime</h2>
+          <div class="panel-body">
+            <div class="status">
+              <div class="status-row"><span class="muted">State</span><span class="value" id="phase">idle</span></div>
+              <div class="status-row wide"><span class="muted">Message</span><span class="value" id="message">Loading</span></div>
+              <div class="status-row"><span class="muted">Selected</span><span class="value" id="selected">None</span></div>
+              <div class="status-row wide"><span class="muted">Maps</span><span class="value" id="selectedMaps">All maps</span></div>
+              <div class="status-row"><span class="muted">Detection</span><span class="value" id="detection">websocket</span></div>
+              <div class="status-row wide"><span class="muted">GLZ route</span><span class="value" id="route">Not resolved</span></div>
+              <div class="status-row"><span class="muted">Attempts</span><span class="value" id="attempts">0</span></div>
+              <div class="status-row"><span class="muted">Match</span><span class="value" id="match">None</span></div>
+            </div>
+            <label class="toggle"><input id="selectBeforeLock" type="checkbox" /> Select before lock</label>
+            <label class="toggle"><input id="autoRearm" type="checkbox" /> Auto re-arm</label>
+            <label class="field">
+              <span>Detection mode</span>
+              <select id="detectionMode">
+                <option value="websocket">Websocket</option>
+                <option value="polling">Polling</option>
+                <option value="hybrid">Hybrid</option>
+              </select>
+            </label>
+            <div class="controls">
+              <button class="primary" id="arm">Arm</button>
+              <button id="disarm">Disarm</button>
+              <button id="refresh">Refresh UI</button>
+            </div>
+          </div>
+        </section>
+        <section class="panel">
+          <h2>Event Log</h2>
+          <div class="panel-body">
+            <div class="log" id="events"></div>
+          </div>
+        </section>
+      </aside>
+      <section class="content">
+        <section class="panel">
+          <h2>Agents</h2>
+          <div class="panel-body">
+            <div class="muted" id="agentHint">Loading public agent data...</div>
+            <div class="agents" id="agents"></div>
+          </div>
+        </section>
+        <section class="panel">
+          <h2>Maps</h2>
+          <div class="panel-body">
+            <p class="map-help">Leave every map unselected to allow all maps.</p>
+            <div class="muted" id="mapHint">Loading public map data...</div>
+            <div class="maps" id="maps"></div>
+          </div>
+        </section>
+      </section>
+    </section>
+  </main>
+  <script>
+    let current = { agents: [], maps: [], events: [], state: {} };
+    const queue = [];
+    let processing = false;
+    let stream = null;
+    let renderQueued = false;
+    let lastRendered = "";
+    let lastAgentsSignature = "";
+    let lastMapsSignature = "";
+    let lastEventsSignature = "";
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { "content-type": "application/json" },
+        ...options
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      return data;
+    }
+
+    function enqueue(event) {
+      if (event.type === "set_agent") {
+        const index = queue.findIndex((queued) => queued.type === "set_agent");
+        if (index >= 0) queue.splice(index, 1);
+      }
+      if (event.type === "set_select_before_lock") {
+        const index = queue.findIndex((queued) => queued.type === "set_select_before_lock");
+        if (index >= 0) queue.splice(index, 1);
+      }
+      if (event.type === "set_auto_rearm") {
+        const index = queue.findIndex((queued) => queued.type === "set_auto_rearm");
+        if (index >= 0) queue.splice(index, 1);
+      }
+      if (event.type === "set_detection_mode") {
+        const index = queue.findIndex((queued) => queued.type === "set_detection_mode");
+        if (index >= 0) queue.splice(index, 1);
+      }
+      if (event.type === "set_maps") {
+        const index = queue.findIndex((queued) => queued.type === "set_maps");
+        if (index >= 0) queue.splice(index, 1);
+      }
+      if (event.type === "arm" || event.type === "disarm" || event.type === "refresh") {
+        const index = queue.findIndex((queued) => queued.type === event.type);
+        if (index >= 0) queue.splice(index, 1);
+      }
+
+      queue.push(event);
+      processQueue();
+    }
+
+    async function processQueue() {
+      if (processing) return;
+      processing = true;
+
+      while (queue.length) {
+        const event = queue.shift();
+        try {
+          await handleEvent(event);
+        } catch (err) {
+          alert(err.message);
+          await loadState();
+        }
+      }
+
+      processing = false;
+      scheduleRender();
+    }
+
+    async function handleEvent(event) {
+      switch (event.type) {
+        case "refresh":
+          await loadState();
+          break;
+        case "set_agent":
+          current = await api("/api/config", {
+            method: "POST",
+            body: JSON.stringify({ selected_agent_uuid: event.uuid })
+          });
+          break;
+        case "set_select_before_lock":
+          current = await api("/api/config", {
+            method: "POST",
+            body: JSON.stringify({ select_before_lock: event.enabled })
+          });
+          break;
+        case "set_auto_rearm":
+          current = await api("/api/config", {
+            method: "POST",
+            body: JSON.stringify({ auto_rearm: event.enabled })
+          });
+          break;
+        case "set_detection_mode":
+          current = await api("/api/config", {
+            method: "POST",
+            body: JSON.stringify({ detection_mode: event.mode })
+          });
+          break;
+        case "set_maps":
+          current = await api("/api/config", {
+            method: "POST",
+            body: JSON.stringify({ selected_map_urls: event.urls })
+          });
+          break;
+        case "arm":
+          current = await api("/api/arm", { method: "POST", body: "{}" });
+          break;
+        case "disarm":
+          current = await api("/api/disarm", { method: "POST", body: "{}" });
+          break;
+      }
+    }
+
+    async function loadState() {
+      current = await api("/api/state");
+    }
+
+    function connectStream() {
+      if (stream) stream.close();
+      stream = new EventSource("/api/stream");
+      stream.addEventListener("state", (event) => {
+        current = JSON.parse(event.data);
+        scheduleRender();
+      });
+      stream.onerror = () => {
+        setText("saved", "Reconnecting");
+      };
+    }
+
+    function scheduleRender() {
+      if (renderQueued) return;
+      renderQueued = true;
+      queueMicrotask(() => {
+        renderQueued = false;
+        renderIfChanged();
+      });
+    }
+
+    function renderIfChanged() {
+      const state = current.state;
+      const viewModel = {
+        state,
+        agents: current.agents.map((agent) => [agent.uuid, agent.display_name, agent.display_icon, agent.role]),
+        maps: current.maps.map((map) => [map.uuid, map.display_name, map.map_url, map.list_view_icon, map.in_ranked_pool]),
+        events: current.events,
+        processing,
+        queued: queue.map((event) => event.type)
+      };
+      const signature = JSON.stringify(viewModel);
+      if (signature === lastRendered) return;
+      lastRendered = signature;
+      render();
+    }
+
+    function setText(id, value) {
+      const element = $(id);
+      if (element.textContent !== String(value)) element.textContent = value;
+    }
+
+    function setDisabled(id, value) {
+      const element = $(id);
+      if (element.disabled !== value) element.disabled = value;
+    }
+
+    function render() {
+      const state = current.state;
+      const selectedAgent = current.agents.find((agent) => agent.uuid === state.selected_agent_uuid);
+      const selectedMapUrls = state.selected_map_urls || [];
+      const selectedMapNames = selectedMapUrls.map((url) => {
+        const map = current.maps.find((entry) => entry.map_url.toLowerCase() === url.toLowerCase());
+        return map ? map.display_name : url.split("/").filter(Boolean).pop();
+      });
+      setText("phase", state.phase);
+      setText("message", state.message);
+      setText("selected", selectedAgent ? selectedAgent.display_name : (state.selected_agent_uuid || "None"));
+      setText("selectedMaps", selectedMapNames.length ? selectedMapNames.join(", ") : "All maps");
+      setText("detection", state.detection_mode);
+      setText("route", state.glz_route || "Not resolved until Arm");
+      setText("attempts", state.lock_attempts);
+      setText("match", state.last_match_id || "None");
+      setText("saved", state.armed ? "Armed" : (state.rearm_pending ? "Auto re-arm pending" : "Idle"));
+      if ($("selectBeforeLock").checked !== state.select_before_lock) {
+        $("selectBeforeLock").checked = state.select_before_lock;
+      }
+      if ($("autoRearm").checked !== state.auto_rearm) {
+        $("autoRearm").checked = state.auto_rearm;
+      }
+      if (document.activeElement !== $("detectionMode") && $("detectionMode").value !== state.detection_mode) {
+        $("detectionMode").value = state.detection_mode;
+      }
+      setDisabled("detectionMode", state.armed || state.rearm_pending || processing);
+      setDisabled("autoRearm", state.armed || state.rearm_pending || processing);
+      setDisabled("arm", state.armed || state.rearm_pending || processing || queue.some((event) => event.type === "arm"));
+      setDisabled("disarm", (!state.armed && !state.rearm_pending) || processing || queue.some((event) => event.type === "disarm"));
+      renderAgentsIfChanged();
+      renderMapsIfChanged();
+      renderEventsIfChanged();
+    }
+
+    function renderAgentsIfChanged() {
+      const signature = JSON.stringify({
+        selected: current.state.selected_agent_uuid,
+        agents: current.agents.map((agent) => [agent.uuid, agent.display_name, agent.display_icon, agent.role])
+      });
+      if (signature === lastAgentsSignature) return;
+      lastAgentsSignature = signature;
+
+      const wrap = $("agents");
+      wrap.innerHTML = "";
+      $("agentHint").style.display = current.agents.length ? "none" : "block";
+      let lastRole = "";
+      for (const agent of current.agents) {
+        const role = agent.role || "Agent";
+        if (role !== lastRole) {
+          const separator = document.createElement("div");
+          separator.className = "role-separator";
+          separator.textContent = role;
+          wrap.appendChild(separator);
+          lastRole = role;
+        }
+        const button = document.createElement("button");
+        button.className = "agent" + (agent.uuid === current.state.selected_agent_uuid ? " selected" : "");
+        button.innerHTML = `${agent.display_icon ? `<img alt="" src="${agent.display_icon}">` : ""}<span><strong>${agent.display_name}</strong><span>${agent.role || "Agent"}</span></span>`;
+        button.onclick = () => enqueue({ type: "set_agent", uuid: agent.uuid });
+        wrap.appendChild(button);
+      }
+    }
+
+    function renderMapsIfChanged() {
+      const selected = current.state.selected_map_urls || [];
+      const signature = JSON.stringify({
+        selected,
+        armed: current.state.armed,
+        rearmPending: current.state.rearm_pending,
+        processing,
+        maps: current.maps.map((map) => [map.uuid, map.display_name, map.map_url, map.list_view_icon, map.splash, map.in_ranked_pool])
+      });
+      if (signature === lastMapsSignature) return;
+      lastMapsSignature = signature;
+
+      const wrap = $("maps");
+      wrap.innerHTML = "";
+      $("mapHint").style.display = current.maps.length ? "none" : "block";
+      const ranked = current.maps.filter((map) => map.in_ranked_pool);
+      const remaining = current.maps.filter((map) => !map.in_ranked_pool);
+      appendMapGroup(wrap, "Ranked Pool", ranked, selected);
+      appendMapGroup(wrap, "Remaining", remaining, selected);
+    }
+
+    function appendMapGroup(wrap, title, maps, selected) {
+      const group = document.createElement("div");
+      group.className = "map-group";
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      group.appendChild(heading);
+      const list = document.createElement("div");
+      list.className = "map-list";
+      if (!maps.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-log";
+        empty.textContent = "No maps";
+        list.appendChild(empty);
+      }
+      for (const map of maps) {
+        const isSelected = selected.some((url) => url.toLowerCase() === map.map_url.toLowerCase());
+        const button = document.createElement("button");
+        button.className = "map" + (isSelected ? " selected" : "");
+        button.disabled = current.state.armed || current.state.rearm_pending || processing;
+        button.innerHTML = `${map.list_view_icon ? `<img alt="" src="${map.list_view_icon}">` : ""}<span><strong>${map.display_name}</strong></span>`;
+        button.onclick = () => toggleMap(map.map_url);
+        list.appendChild(button);
+      }
+      group.appendChild(list);
+      wrap.appendChild(group);
+    }
+
+    function toggleMap(mapUrl) {
+      const selected = [...(current.state.selected_map_urls || [])];
+      const index = selected.findIndex((url) => url.toLowerCase() === mapUrl.toLowerCase());
+      if (index >= 0) {
+        selected.splice(index, 1);
+      } else {
+        selected.push(mapUrl);
+      }
+      enqueue({ type: "set_maps", urls: selected });
+    }
+
+    function renderEventsIfChanged() {
+      const signature = JSON.stringify(current.events);
+      if (signature === lastEventsSignature) return;
+      lastEventsSignature = signature;
+
+      const wrap = $("events");
+      wrap.innerHTML = "";
+      if (!current.events.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-log";
+        empty.textContent = "No events yet";
+        wrap.appendChild(empty);
+        return;
+      }
+      for (const event of [...current.events].reverse()) {
+        const row = document.createElement("div");
+        row.className = `event ${event.level}`;
+        row.innerHTML = `<small>${new Date(event.ts * 1000).toLocaleTimeString()} - ${event.level}</small>${event.message}`;
+        wrap.appendChild(row);
+      }
+    }
+
+    $("selectBeforeLock").onchange = (event) => enqueue({ type: "set_select_before_lock", enabled: event.target.checked });
+    $("autoRearm").onchange = (event) => enqueue({ type: "set_auto_rearm", enabled: event.target.checked });
+    $("detectionMode").onchange = (event) => enqueue({ type: "set_detection_mode", mode: event.target.value });
+    $("arm").onclick = () => enqueue({ type: "arm" });
+    $("disarm").onclick = () => enqueue({ type: "disarm" });
+    $("refresh").onclick = () => enqueue({ type: "refresh" });
+
+    enqueue({ type: "refresh" });
+    connectStream();
+  </script>
+</body>
+</html>
