@@ -1,17 +1,19 @@
 use crate::{
-    app::{AppState, DetectionMode, StateResponse, push_event, snapshot},
-    riot::{self, LiveContext, PregameMatch},
+    app::{AppState, DetectionMode, StateResponse, UiPhase, push_event, snapshot},
+    riot::{self, LiveContext, PregameApiError, PregameMatch},
 };
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     sync::mpsc,
-    time::{Duration, sleep},
+    time::{Duration, Instant, sleep},
 };
 use tokio_tungstenite::{tungstenite::client::IntoClientRequest, tungstenite::protocol::Message};
 use tracing::error;
 
 const HYBRID_FALLBACK_MS: u64 = 1000;
+const LOCK_RETRY_MS: u64 = 250;
+const LOCK_SEQUENCE_TIMEOUT_MS: u64 = 8000;
 
 pub async fn arm(app: AppState) -> Result<StateResponse> {
     let selected_agent_uuid = {
@@ -22,7 +24,7 @@ pub async fn arm(app: AppState) -> Result<StateResponse> {
 
         inner.state.armed = false;
         inner.state.rearm_pending = false;
-        inner.state.phase = "arming".to_string();
+        inner.state.phase = UiPhase::Arming;
         inner.state.message = "Refreshing live Riot and agent data.".to_string();
         inner.state.lock_attempts = 0;
         inner.state.last_match_id = None;
@@ -38,7 +40,7 @@ pub async fn arm(app: AppState) -> Result<StateResponse> {
             let mut inner = app.inner.lock().await;
             inner.state.armed = false;
             inner.state.rearm_pending = false;
-            inner.state.phase = "idle".to_string();
+            inner.state.phase = UiPhase::Idle;
             inner.state.message = "Select an agent before arming.".to_string();
             snapshot(&inner)
         };
@@ -80,7 +82,7 @@ pub async fn arm(app: AppState) -> Result<StateResponse> {
     {
         let mut inner = app.inner.lock().await;
         inner.state.armed = true;
-        inner.state.phase = "armed".to_string();
+        inner.state.phase = UiPhase::Detecting;
         inner.state.message = "Armed. Waiting for pre-game lobby.".to_string();
         inner.state.glz_route = Some(live.glz_base.clone());
         push_event(
@@ -111,7 +113,7 @@ pub async fn arm(app: AppState) -> Result<StateResponse> {
             let mut inner = poller_app.inner.lock().await;
             inner.state.armed = false;
             inner.state.rearm_pending = false;
-            inner.state.phase = "error".to_string();
+            inner.state.phase = UiPhase::Error;
             inner.state.message = err.to_string();
             inner.poller = None;
             push_event(&mut inner, "error", &err.to_string());
@@ -132,7 +134,7 @@ async fn rollback_arm_failure(app: &AppState, message: &str) {
     let mut inner = app.inner.lock().await;
     inner.state.armed = false;
     inner.state.rearm_pending = false;
-    inner.state.phase = "idle".to_string();
+    inner.state.phase = UiPhase::Idle;
     inner.state.message = format!("Arm failed: {message}");
     inner.state.glz_route = None;
     inner.state.last_match_id = None;
@@ -186,6 +188,15 @@ async fn websocket_lobbies(
     live: LiveContext,
     selected_agent_uuid: String,
 ) -> Result<()> {
+    if let Some(candidate) = detect_current_pregame_candidate_or_warn(&app, &live).await?
+        && process_pregame_candidate(&app, &live, &selected_agent_uuid, candidate).await?
+    {
+        return Ok(());
+    }
+    if !is_armed(&app).await {
+        return Ok(());
+    }
+
     let (pregame_tx, mut pregame_rx) = mpsc::channel::<()>(8);
     let ws_live = live.clone();
     let ws_handle = tokio::spawn(async move { listen_for_pregame_ws(ws_live, pregame_tx).await });
@@ -197,8 +208,7 @@ async fn websocket_lobbies(
                 if maybe_event.is_none() {
                     return Err(anyhow!("Riot Client websocket event channel closed"));
                 }
-                try_lock_from_pregame(&app, &live, &selected_agent_uuid).await?;
-                if !is_armed(&app).await {
+                if process_pregame_candidate(&app, &live, &selected_agent_uuid, PregameCandidate::from_signal()).await? {
                     return Ok(());
                 }
             }
@@ -217,7 +227,11 @@ async fn polling_lobbies(
 ) -> Result<()> {
     loop {
         sleep(Duration::from_millis(poll_ms)).await;
-        try_lock_from_pregame(&app, &live, &selected_agent_uuid).await?;
+        if let Some(candidate) = detect_current_pregame_candidate_or_warn(&app, &live).await?
+            && process_pregame_candidate(&app, &live, &selected_agent_uuid, candidate).await?
+        {
+            return Ok(());
+        }
 
         if !is_armed(&app).await {
             return Ok(());
@@ -246,12 +260,24 @@ async fn hybrid_lobbies(
     });
 
     loop {
-        tokio::select! {
-            _ = pregame_rx.recv() => {}
-            _ = sleep(Duration::from_millis(HYBRID_FALLBACK_MS)) => {}
-        }
+        let candidate = tokio::select! {
+            maybe_event = pregame_rx.recv() => {
+                if maybe_event.is_none() {
+                    continue;
+                }
+                PregameCandidate::from_signal()
+            }
+            _ = sleep(Duration::from_millis(HYBRID_FALLBACK_MS)) => {
+                let Some(candidate) = detect_current_pregame_candidate_or_warn(&app, &live).await? else {
+                    continue;
+                };
+                candidate
+            }
+        };
 
-        try_lock_from_pregame(&app, &live, &selected_agent_uuid).await?;
+        if process_pregame_candidate(&app, &live, &selected_agent_uuid, candidate).await? {
+            return Ok(());
+        }
 
         if !is_armed(&app).await {
             return Ok(());
@@ -259,129 +285,289 @@ async fn hybrid_lobbies(
     }
 }
 
-async fn try_lock_from_pregame(
+async fn detect_current_pregame_candidate(live: &LiveContext) -> Result<Option<PregameCandidate>> {
+    Ok(riot::get_pregame_player(live)
+        .await?
+        .map(PregameCandidate::with_match_id))
+}
+
+async fn detect_current_pregame_candidate_or_warn(
     app: &AppState,
     live: &LiveContext,
-    selected_agent_uuid: &str,
-) -> Result<()> {
-    if !is_armed(app).await {
-        return Ok(());
-    }
-
-    match riot::get_pregame_player(live).await {
-        Ok(Some(match_id)) => handle_pregame_match(app, live, selected_agent_uuid, match_id).await,
+) -> Result<Option<PregameCandidate>> {
+    match detect_current_pregame_candidate(live).await {
+        Ok(candidate @ Some(_)) => Ok(candidate),
         Ok(None) => {
-            let mut changed = false;
-            {
-                let mut inner = app.inner.lock().await;
-                if inner.state.phase != "armed" {
-                    inner.state.phase = "armed".to_string();
-                    inner.state.message = "Armed. Waiting for pre-game lobby.".to_string();
-                    changed = true;
-                }
-            }
-            if changed {
+            let mut inner = app.inner.lock().await;
+            if inner.state.armed && inner.state.phase == UiPhase::Warning {
+                inner.state.phase = UiPhase::Detecting;
+                inner.state.message = "Armed. Waiting for pre-game lobby.".to_string();
                 app.notify();
             }
-            Ok(())
+            Ok(None)
         }
         Err(err) => {
             let mut inner = app.inner.lock().await;
-            inner.state.phase = "warning".to_string();
+            inner.state.phase = UiPhase::Warning;
             inner.state.message = "Pregame check failed; will retry.".to_string();
             push_event(&mut inner, "warn", &format!("Pregame check failed: {err}"));
             app.notify();
-            Ok(())
+            Ok(None)
         }
     }
 }
 
-async fn handle_pregame_match(
+async fn process_pregame_candidate(
     app: &AppState,
     live: &LiveContext,
     selected_agent_uuid: &str,
-    match_id: String,
-) -> Result<()> {
+    candidate: PregameCandidate,
+) -> Result<bool> {
+    match run_lock_sequence(app, live, selected_agent_uuid, candidate).await? {
+        LockSequenceResult::Finished => Ok(true),
+        LockSequenceResult::Expired => handle_lock_sequence_expired(app, live).await,
+    }
+}
+
+async fn handle_lock_sequence_expired(app: &AppState, live: &LiveContext) -> Result<bool> {
     {
-        let inner = app.inner.lock().await;
-        if inner.state.last_match_id.as_deref() == Some(&match_id)
-            && matches!(
-                inner.state.phase.as_str(),
-                "locking" | "locked" | "locked_other_agent"
-            )
-        {
-            return Ok(());
-        }
+        let mut inner = app.inner.lock().await;
+        push_event(
+            &mut inner,
+            "warn",
+            "Pregame candidate expired before match data or lock was ready.",
+        );
     }
+    app.notify();
 
-    let match_state = riot::get_pregame_match(live, &match_id).await?;
-    if !map_is_allowed(app, &match_state.map_id).await {
-        skip_unselected_map(app, match_id, &match_state.map_id).await;
-        return Ok(());
-    }
-
-    match locked_status_for_player(&match_state, &live.puuid, selected_agent_uuid) {
-        PlayerLockStatus::LockedSelected => {
-            finish_happy_path(
-                app,
-                "locked",
-                "Already locked selected agent for this game.",
-                "info",
-                "Already locked selected agent for this game.",
-                Some(match_id),
-                Some(selected_agent_uuid.to_string()),
-            )
-            .await;
-            return Ok(());
+    if riot::get_local_player_session_loop_state(live)
+        .await?
+        .is_some_and(|state| state.eq_ignore_ascii_case("MENUS"))
+    {
+        let mut inner = app.inner.lock().await;
+        if inner.state.armed {
+            inner.state.phase = UiPhase::Detecting;
+            inner.state.message = "Returned to menu. Waiting for pre-game lobby.".to_string();
+            inner.state.last_match_id = None;
+            inner.state.last_lock_agent_uuid = None;
         }
-        PlayerLockStatus::LockedOther(agent_uuid) => {
-            let message = format!("Already locked a different agent: {agent_uuid}.");
-            finish_happy_path(
-                app,
-                "locked_other_agent",
-                &message,
-                "warn",
-                "Already locked a different agent for this game.",
-                Some(match_id),
-                Some(agent_uuid),
-            )
-            .await;
-            return Ok(());
-        }
-        PlayerLockStatus::NotLocked | PlayerLockStatus::PlayerMissing => {}
+        app.notify();
+        return Ok(false);
     }
 
     {
         let mut inner = app.inner.lock().await;
-        if inner.state.last_match_id.as_deref() == Some(&match_id) && inner.state.phase == "locking"
-        {
-            return Ok(());
-        }
-        inner.state.phase = "locking".to_string();
-        inner.state.message = "Pre-game detected. Sending lock request.".to_string();
-        inner.state.last_match_id = Some(match_id.clone());
-        inner.state.last_lock_agent_uuid = Some(selected_agent_uuid.to_string());
+        inner.state.armed = false;
+        inner.state.rearm_pending = true;
+        inner.state.phase = UiPhase::WaitingMenus;
+        inner.state.message =
+            "Pregame candidate expired. Waiting for menu before retrying.".to_string();
+        push_event(
+            &mut inner,
+            "info",
+            "Waiting for menu before retrying detection.",
+        );
+    }
+    app.notify();
+    Ok(true)
+}
+
+async fn run_lock_sequence(
+    app: &AppState,
+    live: &LiveContext,
+    selected_agent_uuid: &str,
+    mut candidate: PregameCandidate,
+) -> Result<LockSequenceResult> {
+    if !is_armed(app).await {
+        return Ok(LockSequenceResult::Finished);
+    }
+
+    {
+        let mut inner = app.inner.lock().await;
+        inner.state.phase = UiPhase::ResolvingMatch;
+        inner.state.message = "Pre-game detected. Resolving match data.".to_string();
         inner.state.lock_attempts += 1;
-        push_event(&mut inner, "info", "Pre-game detected. Attempting lock.");
+        inner.state.last_match_id = candidate.initial_match_id.clone();
+        inner.state.last_lock_agent_uuid = None;
+        push_event(
+            &mut inner,
+            "info",
+            "Pre-game detected. Starting lock sequence.",
+        );
     }
     app.notify();
 
-    if live.select_before_lock {
-        riot::select_agent(live, &match_id, selected_agent_uuid).await?;
-    }
-    riot::lock_agent(live, &match_id, selected_agent_uuid).await?;
+    let deadline = Instant::now() + Duration::from_millis(LOCK_SEQUENCE_TIMEOUT_MS);
+    let mut use_initial_match_id = true;
 
-    finish_happy_path(
-        app,
-        "locked",
-        "Agent lock request succeeded.",
-        "info",
-        "Agent lock request succeeded.",
-        Some(match_id),
-        Some(selected_agent_uuid.to_string()),
-    )
-    .await;
-    Ok(())
+    loop {
+        if !is_armed(app).await {
+            return Ok(LockSequenceResult::Finished);
+        }
+
+        let Some(match_id) = resolve_match_id(live, &mut candidate, use_initial_match_id).await?
+        else {
+            if !sleep_until_next_lock_retry(deadline).await {
+                return Ok(LockSequenceResult::Expired);
+            }
+            use_initial_match_id = false;
+            continue;
+        };
+        use_initial_match_id = false;
+
+        {
+            let mut inner = app.inner.lock().await;
+            inner.state.phase = UiPhase::ResolvingMatch;
+            inner.state.message = "Pre-game detected. Resolving match data.".to_string();
+            inner.state.last_match_id = Some(match_id.clone());
+        }
+        app.notify();
+
+        let match_state = match riot::get_pregame_match(live, &match_id).await {
+            Ok(match_state) => match_state,
+            Err(err) if is_transient_pregame_error(&err) => {
+                if !sleep_until_next_lock_retry(deadline).await {
+                    return Ok(LockSequenceResult::Expired);
+                }
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+
+        if !map_is_allowed(app, &match_state.map_id).await {
+            skip_unselected_map(app, match_id, &match_state.map_id).await;
+            return Ok(LockSequenceResult::Finished);
+        }
+
+        match locked_status_for_player(&match_state, &live.puuid, selected_agent_uuid) {
+            PlayerLockStatus::LockedSelected => {
+                finish_happy_path(
+                    app,
+                    UiPhase::Locked,
+                    "Already locked selected agent for this game.",
+                    "info",
+                    "Already locked selected agent for this game.",
+                    Some(match_id),
+                    Some(selected_agent_uuid.to_string()),
+                )
+                .await;
+                return Ok(LockSequenceResult::Finished);
+            }
+            PlayerLockStatus::LockedOther(agent_uuid) => {
+                let message = format!("Already locked a different agent: {agent_uuid}.");
+                finish_happy_path(
+                    app,
+                    UiPhase::LockedOtherAgent,
+                    &message,
+                    "warn",
+                    "Already locked a different agent for this game.",
+                    Some(match_id),
+                    Some(agent_uuid),
+                )
+                .await;
+                return Ok(LockSequenceResult::Finished);
+            }
+            PlayerLockStatus::NotLocked | PlayerLockStatus::PlayerMissing => {}
+        }
+
+        {
+            let mut inner = app.inner.lock().await;
+            inner.state.phase = UiPhase::Locking;
+            inner.state.message = "Match data ready. Sending lock request.".to_string();
+            inner.state.last_match_id = Some(match_id.clone());
+            inner.state.last_lock_agent_uuid = Some(selected_agent_uuid.to_string());
+            push_event(&mut inner, "info", "Attempting agent lock.");
+        }
+        app.notify();
+
+        if live.select_before_lock {
+            match riot::select_agent(live, &match_id, selected_agent_uuid).await {
+                Ok(()) => {}
+                Err(err) if is_transient_pregame_error(&err) => {
+                    if !sleep_until_next_lock_retry(deadline).await {
+                        return Ok(LockSequenceResult::Expired);
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        match riot::lock_agent(live, &match_id, selected_agent_uuid).await {
+            Ok(()) => {
+                finish_happy_path(
+                    app,
+                    UiPhase::Locked,
+                    "Agent lock request succeeded.",
+                    "info",
+                    "Agent lock request succeeded.",
+                    Some(match_id),
+                    Some(selected_agent_uuid.to_string()),
+                )
+                .await;
+                return Ok(LockSequenceResult::Finished);
+            }
+            Err(err) if is_transient_pregame_error(&err) => {
+                if !sleep_until_next_lock_retry(deadline).await {
+                    return Ok(LockSequenceResult::Expired);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PregameCandidate {
+    initial_match_id: Option<String>,
+}
+
+impl PregameCandidate {
+    fn from_signal() -> Self {
+        Self {
+            initial_match_id: None,
+        }
+    }
+
+    fn with_match_id(match_id: String) -> Self {
+        Self {
+            initial_match_id: Some(match_id),
+        }
+    }
+}
+
+enum LockSequenceResult {
+    Finished,
+    Expired,
+}
+
+async fn resolve_match_id(
+    live: &LiveContext,
+    candidate: &mut PregameCandidate,
+    use_initial_match_id: bool,
+) -> Result<Option<String>> {
+    if use_initial_match_id && let Some(match_id) = candidate.initial_match_id.take() {
+        return Ok(Some(match_id));
+    }
+
+    riot::get_pregame_player(live).await
+}
+
+fn is_transient_pregame_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<PregameApiError>()
+        .is_some_and(PregameApiError::is_transient)
+}
+
+async fn sleep_until_next_lock_retry(deadline: Instant) -> bool {
+    let now = Instant::now();
+    if now >= deadline {
+        return false;
+    }
+
+    let retry_delay = Duration::from_millis(LOCK_RETRY_MS);
+    let remaining = deadline.saturating_duration_since(now);
+    sleep(retry_delay.min(remaining)).await;
+    Instant::now() < deadline
 }
 
 async fn map_is_allowed(app: &AppState, map_id: &str) -> bool {
@@ -401,7 +587,7 @@ async fn skip_unselected_map(app: &AppState, match_id: String, map_id: &str) {
     };
     finish_happy_path(
         app,
-        "skipped_map",
+        UiPhase::SkippedMap,
         &format!("Skipped {map_name} because it is not selected."),
         "warn",
         &format!("Skipped {map_name}; map is not selected."),
@@ -413,7 +599,7 @@ async fn skip_unselected_map(app: &AppState, match_id: String, map_id: &str) {
 
 async fn finish_happy_path(
     app: &AppState,
-    phase: &str,
+    phase: UiPhase,
     message: &str,
     event_level: &str,
     event_message: &str,
@@ -425,7 +611,11 @@ async fn finish_happy_path(
         let should_auto_rearm = inner.config.auto_rearm;
         inner.state.armed = false;
         inner.state.rearm_pending = should_auto_rearm;
-        inner.state.phase = phase.to_string();
+        inner.state.phase = if should_auto_rearm {
+            UiPhase::WaitingMenus
+        } else {
+            phase
+        };
         inner.state.message = if should_auto_rearm {
             format!("{message} Waiting for menu to auto re-arm.")
         } else {
@@ -520,14 +710,14 @@ struct AutoRearmConfig {
 async fn prepare_auto_rearm(app: &AppState, live: &mut LiveContext) -> Option<AutoRearmConfig> {
     let next = {
         let mut inner = app.inner.lock().await;
-        if !inner.state.rearm_pending || inner.state.phase == "idle" {
+        if !inner.state.rearm_pending || inner.state.phase == UiPhase::Idle {
             inner.poller = None;
             return None;
         }
         let Some(selected_agent_uuid) = inner.config.selected_agent_uuid.clone() else {
             inner.state.armed = false;
             inner.state.rearm_pending = false;
-            inner.state.phase = "idle".to_string();
+            inner.state.phase = UiPhase::Idle;
             inner.state.message = "Select an agent before arming.".to_string();
             inner.poller = None;
             return None;
@@ -535,7 +725,7 @@ async fn prepare_auto_rearm(app: &AppState, live: &mut LiveContext) -> Option<Au
 
         inner.state.armed = true;
         inner.state.rearm_pending = false;
-        inner.state.phase = "armed".to_string();
+        inner.state.phase = UiPhase::Detecting;
         inner.state.message = "Armed. Waiting for pre-game lobby.".to_string();
         inner.state.lock_attempts = 0;
         inner.state.last_match_id = None;
@@ -636,6 +826,7 @@ fn locked_status_for_player(
 mod tests {
     use super::*;
     use crate::riot::{AllyTeam, PregamePlayer};
+    use reqwest::{Client, StatusCode};
 
     fn pregame_match(subject: &str, character_id: &str, state: &str) -> PregameMatch {
         PregameMatch {
@@ -647,6 +838,20 @@ mod tests {
                 }],
             },
             map_id: "/Game/Maps/Ascent/Ascent".to_string(),
+        }
+    }
+
+    fn live_context() -> LiveContext {
+        LiveContext {
+            local_base: "https://127.0.0.1:1".to_string(),
+            local_auth: "Basic token".to_string(),
+            glz_base: "https://glz-na-1.na.a.pvp.net".to_string(),
+            puuid: "me".to_string(),
+            access_token: "access".to_string(),
+            entitlement_token: "entitlement".to_string(),
+            client_version: "version".to_string(),
+            select_before_lock: false,
+            riot_client: Client::new(),
         }
     }
 
@@ -683,6 +888,26 @@ mod tests {
         );
 
         assert_eq!(state, PlayerLockStatus::PlayerMissing);
+    }
+
+    #[tokio::test]
+    async fn initial_candidate_match_id_is_used_once() {
+        let live = live_context();
+        let mut candidate = PregameCandidate::with_match_id("stale-or-current".to_string());
+
+        let match_id = resolve_match_id(&live, &mut candidate, true).await.unwrap();
+
+        assert_eq!(match_id.as_deref(), Some("stale-or-current"));
+        assert!(candidate.initial_match_id.is_none());
+    }
+
+    #[test]
+    fn only_not_found_pregame_errors_are_transient() {
+        let not_found = anyhow!(PregameApiError::MatchRequest(StatusCode::NOT_FOUND));
+        let forbidden = anyhow!(PregameApiError::MatchRequest(StatusCode::FORBIDDEN));
+
+        assert!(is_transient_pregame_error(&not_found));
+        assert!(!is_transient_pregame_error(&forbidden));
     }
 
     #[test]

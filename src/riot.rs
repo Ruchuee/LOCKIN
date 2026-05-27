@@ -11,7 +11,7 @@ use rustls::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::{env, path::PathBuf, sync::Arc};
+use std::{env, fmt, path::PathBuf, sync::Arc};
 use tokio::fs;
 use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 
@@ -108,10 +108,7 @@ pub async fn get_pregame_player(live: &LiveContext) -> Result<Option<String>> {
         return Ok(None);
     }
     if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Pregame player request failed with {}",
-            resp.status()
-        ));
+        return Err(anyhow!(PregameApiError::PlayerRequest(resp.status())));
     }
     let body: Value = resp.json().await?;
     Ok(body
@@ -124,10 +121,7 @@ pub async fn get_pregame_match(live: &LiveContext, match_id: &str) -> Result<Pre
     let url = format!("{}/pregame/v1/matches/{}", live.glz_base, match_id);
     let resp = riot_headers(live.riot_client.get(url), live).send().await?;
     if !resp.status().is_success() {
-        return Err(anyhow!(
-            "Pregame match request failed with {}",
-            resp.status()
-        ));
+        return Err(anyhow!(PregameApiError::MatchRequest(resp.status())));
     }
     resp.json()
         .await
@@ -242,10 +236,48 @@ async fn post_agent_action(live: &LiveContext, url: String, action: &str) -> Res
         .send()
         .await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("{action} request failed with {}", resp.status()));
+        return Err(anyhow!(PregameApiError::AgentAction {
+            action: action.to_string(),
+            status: resp.status(),
+        }));
     }
     Ok(())
 }
+
+#[derive(Debug)]
+pub enum PregameApiError {
+    PlayerRequest(StatusCode),
+    MatchRequest(StatusCode),
+    AgentAction { action: String, status: StatusCode },
+}
+
+impl PregameApiError {
+    pub fn is_transient(&self) -> bool {
+        match self {
+            PregameApiError::PlayerRequest(status)
+            | PregameApiError::MatchRequest(status)
+            | PregameApiError::AgentAction { status, .. } => *status == StatusCode::NOT_FOUND,
+        }
+    }
+}
+
+impl fmt::Display for PregameApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PregameApiError::PlayerRequest(status) => {
+                write!(f, "Pregame player request failed with {status}")
+            }
+            PregameApiError::MatchRequest(status) => {
+                write!(f, "Pregame match request failed with {status}")
+            }
+            PregameApiError::AgentAction { action, status } => {
+                write!(f, "{action} request failed with {status}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PregameApiError {}
 
 fn riot_headers(builder: reqwest::RequestBuilder, live: &LiveContext) -> reqwest::RequestBuilder {
     builder

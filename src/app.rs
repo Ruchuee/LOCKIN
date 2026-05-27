@@ -26,7 +26,7 @@ impl AppState {
         let state = UiState {
             armed: false,
             rearm_pending: false,
-            phase: "idle".to_string(),
+            phase: UiPhase::Idle,
             message: "Idle. Press Arm to refresh live data.".to_string(),
             selected_agent_uuid: config.selected_agent_uuid.clone(),
             selected_map_urls: config.selected_map_urls.clone(),
@@ -131,11 +131,27 @@ pub enum DetectionMode {
     Hybrid,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiPhase {
+    Idle,
+    Arming,
+    Detecting,
+    ResolvingMatch,
+    Locking,
+    Locked,
+    LockedOtherAgent,
+    SkippedMap,
+    WaitingMenus,
+    Warning,
+    Error,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct UiState {
     pub armed: bool,
     pub rearm_pending: bool,
-    pub phase: String,
+    pub phase: UiPhase,
     pub message: String,
     pub selected_agent_uuid: Option<String>,
     pub selected_map_urls: Vec<String>,
@@ -239,7 +255,7 @@ pub async fn disarm(app: &AppState) -> StateResponse {
         }
         inner.state.armed = false;
         inner.state.rearm_pending = false;
-        inner.state.phase = "idle".to_string();
+        inner.state.phase = UiPhase::Idle;
         inner.state.message = "Disarmed. Live sensitive data cleared.".to_string();
         inner.state.glz_route = None;
         inner.state.last_match_id = None;
@@ -307,6 +323,18 @@ mod tests {
     #[test]
     fn default_detection_mode_is_hybrid() {
         assert_eq!(Config::default().detection_mode, DetectionMode::Hybrid);
+    }
+
+    #[test]
+    fn ui_phase_serializes_as_snake_case_string() {
+        assert_eq!(
+            serde_json::to_string(&UiPhase::ResolvingMatch).unwrap(),
+            r#""resolving_match""#
+        );
+        assert_eq!(
+            serde_json::to_string(&UiPhase::LockedOtherAgent).unwrap(),
+            r#""locked_other_agent""#
+        );
     }
 
     #[test]
