@@ -2,6 +2,15 @@
 
 LOCKIN is a Valorant agent instalocker. Pick your agent, arm it from the dashboard, and LOCKIN automatically locks that agent when match is found.
 
+## Features
+
+- **100% automatic**: arm once and LOCKIN handles detection, selection, locking, and re-arming between matches, even when alt-tabbed.
+- **Plug and play**: automatically detects your Valorant session, region, client version, and Riot connection details.
+- **Smart lobby detection**: uses live Riot Client events with polling fallback for reliable pre-game detection.
+- **Map-aware locking**: lock your agent on every map or only the maps you choose.
+- **Auto-updating agents and maps**: pulls current agents, maps, and ranked map pool data at startup.
+- **Minimal background footprint**: stays lightweight while waiting for a lobby.
+
 ## Requirements
 
 - Windows
