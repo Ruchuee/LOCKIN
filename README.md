@@ -1,6 +1,6 @@
 # LOCKIN
 
-LOCKIN is a local Valorant agent insta lock dashboard. It runs on your machine, reads Valorant local state, configurable through web dashboard, and can automatically select and lock your chosen agent when game is detected.
+LOCKIN is a Valorant agent instalocker. Pick your agent, arm it from the dashboard, and LOCKIN automatically locks that agent when match is found.
 
 ## Requirements
 
@@ -9,7 +9,9 @@ LOCKIN is a local Valorant agent insta lock dashboard. It runs on your machine, 
 
 ## Run
 
-From the project directory:
+Download the latest `.exe` from the [releases page](https://github.com/Ruchuee/LOCKIN/releases/latest), and run it.
+
+For development runs from the project directory:
 
 ```powershell
 cargo run --release
@@ -107,6 +109,8 @@ Useful commands:
 cargo test
 cargo build --release
 ```
+
+LOCKIN runs on your machine and reads Valorant local state through Riot Client local APIs.
 
 Important files:
 
