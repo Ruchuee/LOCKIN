@@ -20,6 +20,8 @@
     .grid { display: grid; grid-template-columns: 320px 1fr; gap: 16px; align-items: start; }
     .sidebar { display: grid; gap: 16px; align-items: start; }
     .content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 16px; align-items: start; }
+    .content.per-map { grid-template-columns: minmax(0, 1fr); }
+    .hidden { display: none !important; }
     .panel { border: 1px solid #2b2b2b; background: #0b0b0b; border-radius: 8px; }
     .panel h2 { margin: 0; padding: 14px 16px; border-bottom: 1px solid #242424; font-size: 14px; font-weight: 600; }
     .panel-body { padding: 16px; }
@@ -69,6 +71,7 @@
       text-transform: uppercase;
     }
     .map-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+    .per-map-list { display: grid; gap: 8px; }
     .agent,
     .map {
       min-height: 58px;
@@ -82,12 +85,74 @@
       text-align: left;
     }
     .map { min-height: 50px; padding: 8px; }
+    .map-row {
+      min-height: 58px;
+      border: 1px solid #2b2b2b;
+      background: #090909;
+      border-radius: 8px;
+      padding: 8px;
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) minmax(190px, 260px);
+      gap: 10px;
+      align-items: center;
+    }
+    .map-row.open { border-color: #4b5563; background: #0d0d0d; }
     .agent.selected,
     .map.selected { outline: 2px solid #f5f5f5; border-color: #f5f5f5; }
     .agent img { width: 34px; height: 34px; object-fit: contain; flex: 0 0 auto; }
     .map img { width: 42px; height: 32px; object-fit: cover; border-radius: 4px; background: #111; }
+    .map-row-media { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .map-row-media img { width: 52px; height: 36px; object-fit: cover; border-radius: 4px; background: #111; flex: 0 0 auto; }
     .agent strong { display: block; font-size: 13px; font-weight: 650; }
     .map strong { display: block; font-size: 13px; font-weight: 650; }
+    .map-row strong { display: block; font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-picker { display: grid; gap: 8px; }
+    .agent-picker-trigger {
+      width: 100%;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 8px;
+      padding: 6px 8px;
+      text-align: left;
+    }
+    .agent-picker-trigger img,
+    .agent-choice img {
+      width: 30px;
+      height: 30px;
+      object-fit: contain;
+      flex: 0 0 auto;
+    }
+    .agent-picker-trigger.empty { color: #9ca3af; }
+    .agent-picker-trigger span,
+    .agent-choice span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .agent-picker-grid {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+      gap: 8px;
+      max-height: 280px;
+      overflow: auto;
+      padding-top: 8px;
+      border-top: 1px solid #242424;
+    }
+    .agent-choice {
+      min-height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 8px;
+      padding: 6px 8px;
+      text-align: left;
+    }
+    .agent-choice.selected { outline: 2px solid #f5f5f5; border-color: #f5f5f5; }
+    .agent-choice.no-agent { color: #9ca3af; }
     .agent span { display: block; min-width: 0; color: #8b8b8b; font-size: 12px; }
     .agent strong,
     .agent span span {
@@ -132,6 +197,7 @@
       header { align-items: flex-start; flex-direction: column; }
       .grid { grid-template-columns: 1fr; }
       .content { grid-template-columns: 1fr; }
+      .map-row { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -152,6 +218,7 @@
             <div class="status">
               <div class="status-row"><span class="muted">State</span><span class="value" id="phase">idle</span></div>
               <div class="status-row wide"><span class="muted">Message</span><span class="value" id="message">Loading</span></div>
+              <div class="status-row"><span class="muted">Mode</span><span class="value" id="modeStatus">Global</span></div>
               <div class="status-row"><span class="muted">Selected</span><span class="value" id="selected">None</span></div>
               <div class="status-row wide"><span class="muted">Maps</span><span class="value" id="selectedMaps">All maps</span></div>
               <div class="status-row"><span class="muted">Detection</span><span class="value" id="detection">websocket</span></div>
@@ -159,6 +226,13 @@
               <div class="status-row"><span class="muted">Attempts</span><span class="value" id="attempts">0</span></div>
               <div class="status-row"><span class="muted">Match</span><span class="value" id="match">None</span></div>
             </div>
+            <label class="field">
+              <span>Selection mode</span>
+              <select id="selectionMode">
+                <option value="global">Global</option>
+                <option value="per_map">Per map</option>
+              </select>
+            </label>
             <label class="toggle"><input id="selectBeforeLock" type="checkbox" /> Select before lock</label>
             <label class="toggle"><input id="autoRearm" type="checkbox" /> Auto re-arm</label>
             <label class="field">
@@ -183,8 +257,8 @@
           </div>
         </section>
       </aside>
-      <section class="content">
-        <section class="panel">
+      <section class="content" id="content">
+        <section class="panel" id="agentsPanel">
           <h2>Agents</h2>
           <div class="panel-body">
             <div class="muted" id="agentHint">Loading public agent data...</div>
@@ -192,9 +266,9 @@
           </div>
         </section>
         <section class="panel">
-          <h2>Maps</h2>
+          <h2 id="mapsTitle">Maps</h2>
           <div class="panel-body">
-            <p class="map-help">Leave every map unselected to allow all maps.</p>
+            <p class="map-help" id="mapHelp">Leave every map unselected to allow all maps.</p>
             <div class="muted" id="mapHint">Loading public map data...</div>
             <div class="maps" id="maps"></div>
           </div>
@@ -212,6 +286,7 @@
     let lastAgentsSignature = "";
     let lastMapsSignature = "";
     let lastEventsSignature = "";
+    let openPickerMapUrl = "";
     const $ = (id) => document.getElementById(id);
 
     async function api(path, options = {}) {
@@ -229,6 +304,10 @@
         const index = queue.findIndex((queued) => queued.type === "set_agent");
         if (index >= 0) queue.splice(index, 1);
       }
+      if (event.type === "set_selection_mode") {
+        const index = queue.findIndex((queued) => queued.type === "set_selection_mode");
+        if (index >= 0) queue.splice(index, 1);
+      }
       if (event.type === "set_select_before_lock") {
         const index = queue.findIndex((queued) => queued.type === "set_select_before_lock");
         if (index >= 0) queue.splice(index, 1);
@@ -243,6 +322,10 @@
       }
       if (event.type === "set_maps") {
         const index = queue.findIndex((queued) => queued.type === "set_maps");
+        if (index >= 0) queue.splice(index, 1);
+      }
+      if (event.type === "set_per_map_agents") {
+        const index = queue.findIndex((queued) => queued.type === "set_per_map_agents");
         if (index >= 0) queue.splice(index, 1);
       }
       if (event.type === "arm" || event.type === "disarm" || event.type === "refresh") {
@@ -283,6 +366,12 @@
             body: JSON.stringify({ selected_agent_uuid: event.uuid })
           });
           break;
+        case "set_selection_mode":
+          current = await api("/api/config", {
+            method: "POST",
+            body: JSON.stringify({ selection_mode: event.mode })
+          });
+          break;
         case "set_select_before_lock":
           current = await api("/api/config", {
             method: "POST",
@@ -305,6 +394,12 @@
           current = await api("/api/config", {
             method: "POST",
             body: JSON.stringify({ selected_map_urls: event.urls })
+          });
+          break;
+        case "set_per_map_agents":
+          current = await api("/api/config", {
+            method: "POST",
+            body: JSON.stringify({ per_map_agent_uuids: event.assignments })
           });
           break;
         case "arm":
@@ -349,6 +444,7 @@
         maps: current.maps.map((map) => [map.uuid, map.display_name, map.map_url, map.list_view_icon, map.in_ranked_pool]),
         events: current.events,
         processing,
+        openPickerMapUrl,
         queued: queue.map((event) => event.type)
       };
       const signature = JSON.stringify(viewModel);
@@ -369,16 +465,20 @@
 
     function render() {
       const state = current.state;
+      const selectionMode = state.selection_mode || "global";
       const selectedAgent = current.agents.find((agent) => agent.uuid === state.selected_agent_uuid);
       const selectedMapUrls = state.selected_map_urls || [];
       const selectedMapNames = selectedMapUrls.map((url) => {
         const map = current.maps.find((entry) => entry.map_url.toLowerCase() === url.toLowerCase());
         return map ? map.display_name : url.split("/").filter(Boolean).pop();
       });
+      const perMapAssignments = state.per_map_agent_uuids || {};
+      const perMapCount = Object.keys(perMapAssignments).length;
       setText("phase", state.phase);
       setText("message", state.message);
-      setText("selected", selectedAgent ? selectedAgent.display_name : (state.selected_agent_uuid || "None"));
-      setText("selectedMaps", selectedMapNames.length ? selectedMapNames.join(", ") : "All maps");
+      setText("modeStatus", selectionMode === "per_map" ? "Per map" : "Global");
+      setText("selected", selectionMode === "per_map" ? `${perMapCount} map${perMapCount === 1 ? "" : "s"}` : (selectedAgent ? selectedAgent.display_name : (state.selected_agent_uuid || "None")));
+      setText("selectedMaps", selectionMode === "per_map" ? (perMapCount ? "Assigned maps only" : "No map agents selected") : (selectedMapNames.length ? selectedMapNames.join(", ") : "All maps"));
       setText("detection", state.detection_mode);
       setText("route", state.glz_route || "Not resolved until Arm");
       setText("attempts", state.lock_attempts);
@@ -390,9 +490,13 @@
       if ($("autoRearm").checked !== state.auto_rearm) {
         $("autoRearm").checked = state.auto_rearm;
       }
+      if (document.activeElement !== $("selectionMode") && $("selectionMode").value !== selectionMode) {
+        $("selectionMode").value = selectionMode;
+      }
       if (document.activeElement !== $("detectionMode") && $("detectionMode").value !== state.detection_mode) {
         $("detectionMode").value = state.detection_mode;
       }
+      setDisabled("selectionMode", state.armed || state.rearm_pending || processing);
       setDisabled("detectionMode", state.armed || state.rearm_pending || processing);
       setDisabled("autoRearm", state.armed || state.rearm_pending || processing);
       setDisabled("arm", state.armed || state.rearm_pending || processing || queue.some((event) => event.type === "arm"));
@@ -403,7 +507,11 @@
     }
 
     function renderAgentsIfChanged() {
+      const selectionMode = current.state.selection_mode || "global";
+      $("agentsPanel").classList.toggle("hidden", selectionMode === "per_map");
+      $("content").classList.toggle("per-map", selectionMode === "per_map");
       const signature = JSON.stringify({
+        mode: selectionMode,
         selected: current.state.selected_agent_uuid,
         agents: current.agents.map((agent) => [agent.uuid, agent.display_name, agent.display_icon, agent.role])
       });
@@ -433,11 +541,17 @@
 
     function renderMapsIfChanged() {
       const selected = current.state.selected_map_urls || [];
+      const perMapAssignments = current.state.per_map_agent_uuids || {};
+      const selectionMode = current.state.selection_mode || "global";
       const signature = JSON.stringify({
+        mode: selectionMode,
         selected,
+        perMapAssignments,
         armed: current.state.armed,
         rearmPending: current.state.rearm_pending,
         processing,
+        openPickerMapUrl,
+        agents: current.agents.map((agent) => [agent.uuid, agent.display_name]),
         maps: current.maps.map((map) => [map.uuid, map.display_name, map.map_url, map.list_view_icon, map.splash, map.in_ranked_pool])
       });
       if (signature === lastMapsSignature) return;
@@ -446,10 +560,17 @@
       const wrap = $("maps");
       wrap.innerHTML = "";
       $("mapHint").style.display = current.maps.length ? "none" : "block";
+      setText("mapsTitle", selectionMode === "per_map" ? "Per-map Agents" : "Maps");
+      setText("mapHelp", selectionMode === "per_map" ? "Maps with no agent selected are skipped." : "Leave every map unselected to allow all maps.");
       const ranked = current.maps.filter((map) => map.in_ranked_pool);
       const remaining = current.maps.filter((map) => !map.in_ranked_pool);
-      appendMapGroup(wrap, "Ranked Pool", ranked, selected);
-      appendMapGroup(wrap, "Remaining", remaining, selected);
+      if (selectionMode === "per_map") {
+        appendPerMapGroup(wrap, "Ranked Pool", ranked, perMapAssignments);
+        appendPerMapGroup(wrap, "Remaining", remaining, perMapAssignments);
+      } else {
+        appendMapGroup(wrap, "Ranked Pool", ranked, selected);
+        appendMapGroup(wrap, "Remaining", remaining, selected);
+      }
     }
 
     function appendMapGroup(wrap, title, maps, selected) {
@@ -479,6 +600,76 @@
       wrap.appendChild(group);
     }
 
+    function appendPerMapGroup(wrap, title, maps, assignments) {
+      const group = document.createElement("div");
+      group.className = "map-group";
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      group.appendChild(heading);
+      const list = document.createElement("div");
+      list.className = "per-map-list";
+      if (!maps.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-log";
+        empty.textContent = "No maps";
+        list.appendChild(empty);
+      }
+      for (const map of maps) {
+        const selectedAgentUuid = findAssignment(assignments, map.map_url);
+        const selectedAgent = current.agents.find((agent) => agent.uuid === selectedAgentUuid);
+        const isOpen = openPickerMapUrl.toLowerCase() === map.map_url.toLowerCase();
+        const row = document.createElement("div");
+        row.className = "map-row" + (isOpen ? " open" : "");
+        row.innerHTML = `<div class="map-row-media">${map.list_view_icon ? `<img alt="" src="${map.list_view_icon}">` : ""}<strong>${map.display_name}</strong></div>`;
+        row.appendChild(createAgentPickerTrigger(map, selectedAgent, isOpen));
+        if (isOpen) row.appendChild(createAgentPickerGrid(map, selectedAgentUuid));
+        list.appendChild(row);
+      }
+      group.appendChild(list);
+      wrap.appendChild(group);
+    }
+
+    function createAgentPickerTrigger(map, selectedAgent, isOpen) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "agent-picker-trigger" + (selectedAgent ? "" : " empty");
+      button.disabled = current.state.armed || current.state.rearm_pending || processing;
+      button.setAttribute("aria-expanded", String(isOpen));
+      button.innerHTML = selectedAgent
+        ? `${selectedAgent.display_icon ? `<img alt="" src="${selectedAgent.display_icon}">` : ""}<span>${selectedAgent.display_name}</span>`
+        : `<span>No agent</span>`;
+      button.onclick = () => toggleAgentPicker(map.map_url);
+      return button;
+    }
+
+    function createAgentPickerGrid(map, selectedAgentUuid) {
+      const grid = document.createElement("div");
+      grid.className = "agent-picker-grid";
+      grid.appendChild(createAgentChoice(map.map_url, null, !selectedAgentUuid));
+      for (const agent of current.agents) {
+        grid.appendChild(createAgentChoice(map.map_url, agent, agent.uuid === selectedAgentUuid));
+      }
+      return grid;
+    }
+
+    function createAgentChoice(mapUrl, agent, selected) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `agent-choice${selected ? " selected" : ""}${agent ? "" : " no-agent"}`;
+      button.disabled = current.state.armed || current.state.rearm_pending || processing;
+      button.innerHTML = agent
+        ? `${agent.display_icon ? `<img alt="" src="${agent.display_icon}">` : ""}<span>${agent.display_name}</span>`
+        : `<span>No agent</span>`;
+      button.onclick = () => setPerMapAgent(mapUrl, agent ? agent.uuid : "");
+      return button;
+    }
+
+    function toggleAgentPicker(mapUrl) {
+      openPickerMapUrl = openPickerMapUrl.toLowerCase() === mapUrl.toLowerCase() ? "" : mapUrl;
+      lastMapsSignature = "";
+      scheduleRender();
+    }
+
     function toggleMap(mapUrl) {
       const selected = [...(current.state.selected_map_urls || [])];
       const index = selected.findIndex((url) => url.toLowerCase() === mapUrl.toLowerCase());
@@ -488,6 +679,20 @@
         selected.push(mapUrl);
       }
       enqueue({ type: "set_maps", urls: selected });
+    }
+
+    function findAssignment(assignments, mapUrl) {
+      const key = Object.keys(assignments).find((entry) => entry.toLowerCase() === mapUrl.toLowerCase());
+      return key ? assignments[key] : "";
+    }
+
+    function setPerMapAgent(mapUrl, agentUuid) {
+      const assignments = { ...(current.state.per_map_agent_uuids || {}) };
+      const existingKey = Object.keys(assignments).find((entry) => entry.toLowerCase() === mapUrl.toLowerCase());
+      if (existingKey) delete assignments[existingKey];
+      if (agentUuid) assignments[mapUrl] = agentUuid;
+      openPickerMapUrl = "";
+      enqueue({ type: "set_per_map_agents", assignments });
     }
 
     function renderEventsIfChanged() {
@@ -514,6 +719,7 @@
 
     $("selectBeforeLock").onchange = (event) => enqueue({ type: "set_select_before_lock", enabled: event.target.checked });
     $("autoRearm").onchange = (event) => enqueue({ type: "set_auto_rearm", enabled: event.target.checked });
+    $("selectionMode").onchange = (event) => enqueue({ type: "set_selection_mode", mode: event.target.value });
     $("detectionMode").onchange = (event) => enqueue({ type: "set_detection_mode", mode: event.target.value });
     $("arm").onclick = () => enqueue({ type: "arm" });
     $("disarm").onclick = () => enqueue({ type: "disarm" });

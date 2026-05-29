@@ -1,5 +1,8 @@
 use crate::{
-    app::{AppState, DetectionMode, StateResponse, UiPhase, push_event, snapshot},
+    app::{
+        AppState, Config, DetectionMode, SelectionMode, StateResponse, UiPhase, push_event,
+        snapshot,
+    },
     riot::{self, LiveContext, PregameApiError, PregameMatch},
 };
 use anyhow::{Context, Result, anyhow};
@@ -16,7 +19,7 @@ const LOCK_RETRY_MS: u64 = 250;
 const LOCK_SEQUENCE_TIMEOUT_MS: u64 = 8000;
 
 pub async fn arm(app: AppState) -> Result<StateResponse> {
-    let selected_agent_uuid = {
+    let strategy = {
         let mut inner = app.inner.lock().await;
         if inner.state.armed {
             return Ok(snapshot(&inner));
@@ -31,32 +34,29 @@ pub async fn arm(app: AppState) -> Result<StateResponse> {
         inner.state.last_lock_agent_uuid = None;
         inner.state.glz_route = None;
         push_event(&mut inner, "info", "Arming: refreshing live data.");
-        inner.config.selected_agent_uuid.clone()
+        match strategy_from_config(&inner.config) {
+            Ok(strategy) => strategy,
+            Err(message) => {
+                inner.state.armed = false;
+                inner.state.rearm_pending = false;
+                inner.state.phase = UiPhase::Idle;
+                inner.state.message = message.to_string();
+                push_event(&mut inner, "warn", message);
+                app.notify();
+                return Ok(snapshot(&inner));
+            }
+        }
     };
     app.notify();
 
-    let Some(selected_agent_uuid) = selected_agent_uuid else {
-        let response = {
-            let mut inner = app.inner.lock().await;
-            inner.state.armed = false;
-            inner.state.rearm_pending = false;
-            inner.state.phase = UiPhase::Idle;
-            inner.state.message = "Select an agent before arming.".to_string();
-            snapshot(&inner)
-        };
-        app.notify();
-        return Ok(response);
-    };
-
-    let agent_is_known = {
+    let agents_are_known = {
         let inner = app.inner.lock().await;
         inner.agents.is_empty()
-            || inner
-                .agents
-                .iter()
-                .any(|agent| agent.uuid == selected_agent_uuid)
+            || assigned_agent_uuids(&inner.config)
+                .into_iter()
+                .all(|agent_uuid| inner.agents.iter().any(|agent| agent.uuid == agent_uuid))
     };
-    if !agent_is_known {
+    if !agents_are_known {
         let message = "selected agent is not present in fetched playable agent data";
         rollback_arm_failure(&app, message).await;
         return Err(anyhow!(message));
@@ -100,14 +100,8 @@ pub async fn arm(app: AppState) -> Result<StateResponse> {
 
     let poller_app = app.clone();
     let handle = tokio::spawn(async move {
-        if let Err(err) = detect_lobbies(
-            poller_app.clone(),
-            live,
-            selected_agent_uuid,
-            poll_ms,
-            detection_mode,
-        )
-        .await
+        if let Err(err) =
+            detect_lobbies(poller_app.clone(), live, strategy, poll_ms, detection_mode).await
         {
             error!(error = ?err, "poller failed");
             let mut inner = poller_app.inner.lock().await;
@@ -146,26 +140,20 @@ async fn rollback_arm_failure(app: &AppState, message: &str) {
 async fn detect_lobbies(
     app: AppState,
     mut live: LiveContext,
-    mut selected_agent_uuid: String,
+    mut strategy: AgentSelectionStrategy,
     mut poll_ms: u64,
     mut detection_mode: DetectionMode,
 ) -> Result<()> {
     loop {
         match detection_mode {
             DetectionMode::Websocket => {
-                websocket_lobbies(app.clone(), live.clone(), selected_agent_uuid.clone()).await?
+                websocket_lobbies(app.clone(), live.clone(), strategy.clone()).await?
             }
             DetectionMode::Polling => {
-                polling_lobbies(
-                    app.clone(),
-                    live.clone(),
-                    selected_agent_uuid.clone(),
-                    poll_ms,
-                )
-                .await?
+                polling_lobbies(app.clone(), live.clone(), strategy.clone(), poll_ms).await?
             }
             DetectionMode::Hybrid => {
-                hybrid_lobbies(app.clone(), live.clone(), selected_agent_uuid.clone()).await?
+                hybrid_lobbies(app.clone(), live.clone(), strategy.clone()).await?
             }
         }
 
@@ -177,7 +165,7 @@ async fn detect_lobbies(
         let Some(next) = prepare_auto_rearm(&app, &mut live).await else {
             return Ok(());
         };
-        selected_agent_uuid = next.selected_agent_uuid;
+        strategy = next.strategy;
         poll_ms = next.poll_ms;
         detection_mode = next.detection_mode;
     }
@@ -186,10 +174,10 @@ async fn detect_lobbies(
 async fn websocket_lobbies(
     app: AppState,
     live: LiveContext,
-    selected_agent_uuid: String,
+    strategy: AgentSelectionStrategy,
 ) -> Result<()> {
     if let Some(candidate) = detect_current_pregame_candidate_or_warn(&app, &live).await?
-        && process_pregame_candidate(&app, &live, &selected_agent_uuid, candidate).await?
+        && process_pregame_candidate(&app, &live, &strategy, candidate).await?
     {
         return Ok(());
     }
@@ -208,7 +196,7 @@ async fn websocket_lobbies(
                 if maybe_event.is_none() {
                     return Err(anyhow!("Riot Client websocket event channel closed"));
                 }
-                if process_pregame_candidate(&app, &live, &selected_agent_uuid, PregameCandidate::from_signal()).await? {
+                if process_pregame_candidate(&app, &live, &strategy, PregameCandidate::from_signal()).await? {
                     return Ok(());
                 }
             }
@@ -222,13 +210,13 @@ async fn websocket_lobbies(
 async fn polling_lobbies(
     app: AppState,
     live: LiveContext,
-    selected_agent_uuid: String,
+    strategy: AgentSelectionStrategy,
     poll_ms: u64,
 ) -> Result<()> {
     loop {
         sleep(Duration::from_millis(poll_ms)).await;
         if let Some(candidate) = detect_current_pregame_candidate_or_warn(&app, &live).await?
-            && process_pregame_candidate(&app, &live, &selected_agent_uuid, candidate).await?
+            && process_pregame_candidate(&app, &live, &strategy, candidate).await?
         {
             return Ok(());
         }
@@ -242,7 +230,7 @@ async fn polling_lobbies(
 async fn hybrid_lobbies(
     app: AppState,
     live: LiveContext,
-    selected_agent_uuid: String,
+    strategy: AgentSelectionStrategy,
 ) -> Result<()> {
     let (pregame_tx, mut pregame_rx) = mpsc::channel::<()>(8);
     let ws_live = live.clone();
@@ -275,7 +263,7 @@ async fn hybrid_lobbies(
             }
         };
 
-        if process_pregame_candidate(&app, &live, &selected_agent_uuid, candidate).await? {
+        if process_pregame_candidate(&app, &live, &strategy, candidate).await? {
             return Ok(());
         }
 
@@ -320,10 +308,10 @@ async fn detect_current_pregame_candidate_or_warn(
 async fn process_pregame_candidate(
     app: &AppState,
     live: &LiveContext,
-    selected_agent_uuid: &str,
+    strategy: &AgentSelectionStrategy,
     candidate: PregameCandidate,
 ) -> Result<bool> {
-    match run_lock_sequence(app, live, selected_agent_uuid, candidate).await? {
+    match run_lock_sequence(app, live, strategy, candidate).await? {
         LockSequenceResult::Finished => Ok(true),
         LockSequenceResult::Expired => handle_lock_sequence_expired(app, live).await,
     }
@@ -375,7 +363,7 @@ async fn handle_lock_sequence_expired(app: &AppState, live: &LiveContext) -> Res
 async fn run_lock_sequence(
     app: &AppState,
     live: &LiveContext,
-    selected_agent_uuid: &str,
+    strategy: &AgentSelectionStrategy,
     mut candidate: PregameCandidate,
 ) -> Result<LockSequenceResult> {
     if !is_armed(app).await {
@@ -434,12 +422,16 @@ async fn run_lock_sequence(
             Err(err) => return Err(err),
         };
 
-        if !map_is_allowed(app, &match_state.map_id).await {
-            skip_unselected_map(app, match_id, &match_state.map_id).await;
-            return Ok(LockSequenceResult::Finished);
-        }
+        let selected_agent_uuid =
+            match agent_for_match_map(app, strategy, &match_state.map_id).await {
+                MapAgentDecision::Lock(agent_uuid) => agent_uuid,
+                MapAgentDecision::Skip(message) => {
+                    skip_map(app, match_id, &match_state.map_id, &message).await;
+                    return Ok(LockSequenceResult::Finished);
+                }
+            };
 
-        match locked_status_for_player(&match_state, &live.puuid, selected_agent_uuid) {
+        match locked_status_for_player(&match_state, &live.puuid, &selected_agent_uuid) {
             PlayerLockStatus::LockedSelected => {
                 finish_happy_path(
                     app,
@@ -448,7 +440,7 @@ async fn run_lock_sequence(
                     "info",
                     "Already locked selected agent for this game.",
                     Some(match_id),
-                    Some(selected_agent_uuid.to_string()),
+                    Some(selected_agent_uuid),
                 )
                 .await;
                 return Ok(LockSequenceResult::Finished);
@@ -475,13 +467,13 @@ async fn run_lock_sequence(
             inner.state.phase = UiPhase::Locking;
             inner.state.message = "Match data ready. Sending lock request.".to_string();
             inner.state.last_match_id = Some(match_id.clone());
-            inner.state.last_lock_agent_uuid = Some(selected_agent_uuid.to_string());
+            inner.state.last_lock_agent_uuid = Some(selected_agent_uuid.clone());
             push_event(&mut inner, "info", "Attempting agent lock.");
         }
         app.notify();
 
         if live.select_before_lock {
-            match riot::select_agent(live, &match_id, selected_agent_uuid).await {
+            match riot::select_agent(live, &match_id, &selected_agent_uuid).await {
                 Ok(()) => {}
                 Err(err) if is_transient_pregame_error(&err) => {
                     if !sleep_until_next_lock_retry(deadline).await {
@@ -493,7 +485,7 @@ async fn run_lock_sequence(
             }
         }
 
-        match riot::lock_agent(live, &match_id, selected_agent_uuid).await {
+        match riot::lock_agent(live, &match_id, &selected_agent_uuid).await {
             Ok(()) => {
                 finish_happy_path(
                     app,
@@ -502,7 +494,7 @@ async fn run_lock_sequence(
                     "info",
                     "Agent lock request succeeded.",
                     Some(match_id),
-                    Some(selected_agent_uuid.to_string()),
+                    Some(selected_agent_uuid),
                 )
                 .await;
                 return Ok(LockSequenceResult::Finished);
@@ -558,6 +550,87 @@ fn is_transient_pregame_error(err: &anyhow::Error) -> bool {
         .is_some_and(PregameApiError::is_transient)
 }
 
+#[derive(Clone, Debug)]
+enum AgentSelectionStrategy {
+    Global { selected_agent_uuid: String },
+    PerMap,
+}
+
+fn assigned_agent_uuids(config: &Config) -> Vec<&str> {
+    match config.selection_mode {
+        SelectionMode::Global => config
+            .selected_agent_uuid
+            .iter()
+            .map(String::as_str)
+            .collect(),
+        SelectionMode::PerMap => config
+            .per_map_agent_uuids
+            .values()
+            .map(String::as_str)
+            .collect(),
+    }
+}
+
+fn strategy_from_config(
+    config: &Config,
+) -> std::result::Result<AgentSelectionStrategy, &'static str> {
+    match config.selection_mode {
+        SelectionMode::Global => config
+            .selected_agent_uuid
+            .clone()
+            .map(|selected_agent_uuid| AgentSelectionStrategy::Global {
+                selected_agent_uuid,
+            })
+            .ok_or("Select an agent before arming."),
+        SelectionMode::PerMap => {
+            if config.per_map_agent_uuids.is_empty() {
+                Err("Select at least one per-map agent before arming.")
+            } else {
+                Ok(AgentSelectionStrategy::PerMap)
+            }
+        }
+    }
+}
+
+enum MapAgentDecision {
+    Lock(String),
+    Skip(String),
+}
+
+async fn agent_for_match_map(
+    app: &AppState,
+    strategy: &AgentSelectionStrategy,
+    map_id: &str,
+) -> MapAgentDecision {
+    let inner = app.inner.lock().await;
+    match strategy {
+        AgentSelectionStrategy::Global {
+            selected_agent_uuid,
+        } => {
+            if global_map_is_allowed(&inner.config, map_id) {
+                MapAgentDecision::Lock(selected_agent_uuid.clone())
+            } else {
+                MapAgentDecision::Skip("not selected".to_string())
+            }
+        }
+        AgentSelectionStrategy::PerMap => inner
+            .config
+            .per_map_agent_uuids
+            .iter()
+            .find(|(selected_map_url, _)| selected_map_url.eq_ignore_ascii_case(map_id))
+            .map(|(_, agent_uuid)| MapAgentDecision::Lock(agent_uuid.clone()))
+            .unwrap_or_else(|| MapAgentDecision::Skip("no agent selected".to_string())),
+    }
+}
+
+fn global_map_is_allowed(config: &Config, map_id: &str) -> bool {
+    config.selected_map_urls.is_empty()
+        || config
+            .selected_map_urls
+            .iter()
+            .any(|selected| selected.eq_ignore_ascii_case(map_id))
+}
+
 async fn sleep_until_next_lock_retry(deadline: Instant) -> bool {
     let now = Instant::now();
     if now >= deadline {
@@ -570,17 +643,7 @@ async fn sleep_until_next_lock_retry(deadline: Instant) -> bool {
     Instant::now() < deadline
 }
 
-async fn map_is_allowed(app: &AppState, map_id: &str) -> bool {
-    let inner = app.inner.lock().await;
-    inner.config.selected_map_urls.is_empty()
-        || inner
-            .config
-            .selected_map_urls
-            .iter()
-            .any(|selected| selected.eq_ignore_ascii_case(map_id))
-}
-
-async fn skip_unselected_map(app: &AppState, match_id: String, map_id: &str) {
+async fn skip_map(app: &AppState, match_id: String, map_id: &str, reason: &str) {
     let map_name = {
         let inner = app.inner.lock().await;
         map_display_name(&inner.maps, map_id)
@@ -588,9 +651,9 @@ async fn skip_unselected_map(app: &AppState, match_id: String, map_id: &str) {
     finish_happy_path(
         app,
         UiPhase::SkippedMap,
-        &format!("Skipped {map_name} because it is not selected."),
+        &format!("Skipped {map_name} because {reason}."),
         "warn",
-        &format!("Skipped {map_name}; map is not selected."),
+        &format!("Skipped {map_name}; {reason}."),
         Some(match_id),
         None,
     )
@@ -702,7 +765,7 @@ async fn is_rearm_pending(app: &AppState) -> bool {
 }
 
 struct AutoRearmConfig {
-    selected_agent_uuid: String,
+    strategy: AgentSelectionStrategy,
     poll_ms: u64,
     detection_mode: DetectionMode,
 }
@@ -714,14 +777,31 @@ async fn prepare_auto_rearm(app: &AppState, live: &mut LiveContext) -> Option<Au
             inner.poller = None;
             return None;
         }
-        let Some(selected_agent_uuid) = inner.config.selected_agent_uuid.clone() else {
+        let strategy = match strategy_from_config(&inner.config) {
+            Ok(strategy) => strategy,
+            Err(message) => {
+                inner.state.armed = false;
+                inner.state.rearm_pending = false;
+                inner.state.phase = UiPhase::Idle;
+                inner.state.message = message.to_string();
+                inner.poller = None;
+                return None;
+            }
+        };
+
+        let agents_are_known = inner.agents.is_empty()
+            || assigned_agent_uuids(&inner.config)
+                .into_iter()
+                .all(|agent_uuid| inner.agents.iter().any(|agent| agent.uuid == agent_uuid));
+        if !agents_are_known {
             inner.state.armed = false;
             inner.state.rearm_pending = false;
             inner.state.phase = UiPhase::Idle;
-            inner.state.message = "Select an agent before arming.".to_string();
+            inner.state.message =
+                "Selected agent is not present in fetched playable agent data.".to_string();
             inner.poller = None;
             return None;
-        };
+        }
 
         inner.state.armed = true;
         inner.state.rearm_pending = false;
@@ -735,7 +815,7 @@ async fn prepare_auto_rearm(app: &AppState, live: &mut LiveContext) -> Option<Au
 
         live.select_before_lock = inner.config.select_before_lock;
         AutoRearmConfig {
-            selected_agent_uuid,
+            strategy,
             poll_ms: inner.config.poll_ms,
             detection_mode: inner.config.detection_mode,
         }
@@ -931,5 +1011,57 @@ mod tests {
     #[test]
     fn falls_back_to_map_id_tail_for_unknown_map() {
         assert_eq!(map_display_name(&[], "/Game/Maps/Foo/Foo"), "Foo");
+    }
+
+    #[test]
+    fn global_strategy_requires_selected_agent() {
+        let config = Config::default();
+
+        assert!(strategy_from_config(&config).is_err());
+    }
+
+    #[test]
+    fn per_map_strategy_requires_at_least_one_assignment() {
+        let config = Config {
+            selection_mode: SelectionMode::PerMap,
+            ..Config::default()
+        };
+
+        assert!(strategy_from_config(&config).is_err());
+    }
+
+    #[test]
+    fn per_map_strategy_accepts_assignment() {
+        let config = Config {
+            selection_mode: SelectionMode::PerMap,
+            per_map_agent_uuids: std::collections::BTreeMap::from([(
+                "/Game/Maps/Ascent/Ascent".to_string(),
+                "agent".to_string(),
+            )]),
+            ..Config::default()
+        };
+
+        assert!(matches!(
+            strategy_from_config(&config).unwrap(),
+            AgentSelectionStrategy::PerMap
+        ));
+    }
+
+    #[test]
+    fn global_map_filter_allows_all_when_empty() {
+        let config = Config::default();
+
+        assert!(global_map_is_allowed(&config, "/Game/Maps/Ascent/Ascent"));
+    }
+
+    #[test]
+    fn global_map_filter_matches_case_insensitively() {
+        let config = Config {
+            selected_map_urls: vec!["/Game/Maps/Ascent/Ascent".to_string()],
+            ..Config::default()
+        };
+
+        assert!(global_map_is_allowed(&config, "/game/maps/ascent/ascent"));
+        assert!(!global_map_is_allowed(&config, "/Game/Maps/Haven/Haven"));
     }
 }

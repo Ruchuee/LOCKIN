@@ -2,6 +2,7 @@ use crate::detection;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -28,8 +29,10 @@ impl AppState {
             rearm_pending: false,
             phase: UiPhase::Idle,
             message: "Idle. Press Arm to refresh live data.".to_string(),
+            selection_mode: config.selection_mode,
             selected_agent_uuid: config.selected_agent_uuid.clone(),
             selected_map_urls: config.selected_map_urls.clone(),
+            per_map_agent_uuids: config.per_map_agent_uuids.clone(),
             select_before_lock: config.select_before_lock,
             auto_rearm: config.auto_rearm,
             poll_ms: config.poll_ms,
@@ -83,8 +86,10 @@ pub(crate) struct InnerState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub selection_mode: SelectionMode,
     pub selected_agent_uuid: Option<String>,
     pub selected_map_urls: Vec<String>,
+    pub per_map_agent_uuids: BTreeMap<String, String>,
     pub select_before_lock: bool,
     pub auto_rearm: bool,
     pub poll_ms: u64,
@@ -94,8 +99,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            selection_mode: SelectionMode::Global,
             selected_agent_uuid: None,
             selected_map_urls: Vec::new(),
+            per_map_agent_uuids: BTreeMap::new(),
             select_before_lock: false,
             auto_rearm: true,
             poll_ms: DEFAULT_POLL_MS,
@@ -121,6 +128,13 @@ impl Config {
             .await
             .with_context(|| format!("failed to write {}", path.display()))
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionMode {
+    Global,
+    PerMap,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -153,8 +167,10 @@ pub struct UiState {
     pub rearm_pending: bool,
     pub phase: UiPhase,
     pub message: String,
+    pub selection_mode: SelectionMode,
     pub selected_agent_uuid: Option<String>,
     pub selected_map_urls: Vec<String>,
+    pub per_map_agent_uuids: BTreeMap<String, String>,
     pub select_before_lock: bool,
     pub auto_rearm: bool,
     pub poll_ms: u64,
@@ -193,8 +209,10 @@ pub struct Map {
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigRequest {
+    pub selection_mode: Option<SelectionMode>,
     pub selected_agent_uuid: Option<String>,
     pub selected_map_urls: Option<Vec<String>>,
+    pub per_map_agent_uuids: Option<BTreeMap<String, String>>,
     pub select_before_lock: Option<bool>,
     pub auto_rearm: Option<bool>,
     pub detection_mode: Option<DetectionMode>,
@@ -211,6 +229,9 @@ pub struct StateResponse {
 pub async fn apply_config(app: &AppState, req: ConfigRequest) -> Result<StateResponse> {
     let response = {
         let mut inner = app.inner.lock().await;
+        if let Some(selection_mode) = req.selection_mode {
+            inner.config.selection_mode = selection_mode;
+        }
         if let Some(agent_uuid) = req.selected_agent_uuid {
             inner.config.selected_agent_uuid = if agent_uuid.trim().is_empty() {
                 None
@@ -220,6 +241,9 @@ pub async fn apply_config(app: &AppState, req: ConfigRequest) -> Result<StateRes
         }
         if let Some(map_urls) = req.selected_map_urls {
             inner.config.selected_map_urls = clean_map_urls(map_urls);
+        }
+        if let Some(per_map_agent_uuids) = req.per_map_agent_uuids {
+            inner.config.per_map_agent_uuids = clean_per_map_agent_uuids(per_map_agent_uuids);
         }
         if let Some(select_before_lock) = req.select_before_lock {
             inner.config.select_before_lock = select_before_lock;
@@ -231,8 +255,10 @@ pub async fn apply_config(app: &AppState, req: ConfigRequest) -> Result<StateRes
             inner.config.detection_mode = detection_mode;
         }
 
+        inner.state.selection_mode = inner.config.selection_mode;
         inner.state.selected_agent_uuid = inner.config.selected_agent_uuid.clone();
         inner.state.selected_map_urls = inner.config.selected_map_urls.clone();
+        inner.state.per_map_agent_uuids = inner.config.per_map_agent_uuids.clone();
         inner.state.select_before_lock = inner.config.select_before_lock;
         inner.state.auto_rearm = inner.config.auto_rearm;
         inner.state.detection_mode = inner.config.detection_mode;
@@ -291,6 +317,20 @@ fn clean_map_urls(map_urls: Vec<String>) -> Vec<String> {
     cleaned
 }
 
+pub(crate) fn clean_per_map_agent_uuids(
+    per_map_agent_uuids: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut cleaned = BTreeMap::new();
+    for (map_url, agent_uuid) in per_map_agent_uuids {
+        let map_url = map_url.trim();
+        let agent_uuid = agent_uuid.trim();
+        if !map_url.is_empty() && !agent_uuid.is_empty() {
+            cleaned.insert(map_url.to_string(), agent_uuid.to_string());
+        }
+    }
+    cleaned
+}
+
 pub(crate) fn push_event(inner: &mut InnerState, level: &str, message: &str) {
     inner.events.push(AppEvent {
         ts: now_ts(),
@@ -326,6 +366,11 @@ mod tests {
     }
 
     #[test]
+    fn default_selection_mode_is_global() {
+        assert_eq!(Config::default().selection_mode, SelectionMode::Global);
+    }
+
+    #[test]
     fn ui_phase_serializes_as_snake_case_string() {
         assert_eq!(
             serde_json::to_string(&UiPhase::ResolvingMatch).unwrap(),
@@ -349,6 +394,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.detection_mode, DetectionMode::Hybrid);
+        assert_eq!(config.selection_mode, SelectionMode::Global);
     }
 
     #[test]
@@ -394,6 +440,28 @@ mod tests {
                 "/Game/Maps/Ascent/Ascent".to_string(),
                 "/Game/Maps/Haven/Haven".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn cleans_per_map_agent_uuids() {
+        let entries = BTreeMap::from([
+            (
+                " /Game/Maps/Ascent/Ascent ".to_string(),
+                " agent-a ".to_string(),
+            ),
+            ("".to_string(), "agent-b".to_string()),
+            ("/Game/Maps/Haven/Haven".to_string(), "".to_string()),
+        ]);
+
+        let cleaned = clean_per_map_agent_uuids(entries);
+
+        assert_eq!(
+            cleaned,
+            BTreeMap::from([(
+                "/Game/Maps/Ascent/Ascent".to_string(),
+                "agent-a".to_string()
+            )])
         );
     }
 }
