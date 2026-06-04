@@ -982,12 +982,27 @@ mod tests {
     }
 
     #[test]
-    fn only_not_found_pregame_errors_are_transient() {
-        let not_found = anyhow!(PregameApiError::MatchRequest(StatusCode::NOT_FOUND));
-        let forbidden = anyhow!(PregameApiError::MatchRequest(StatusCode::FORBIDDEN));
+    fn pregame_error_transience_matches_retry_policy() {
+        let match_not_found = anyhow!(PregameApiError::MatchRequest(StatusCode::NOT_FOUND));
+        let match_bad_request = anyhow!(PregameApiError::MatchRequest(StatusCode::BAD_REQUEST));
+        let lock_bad_request = anyhow!(PregameApiError::AgentAction {
+            action: "lock".to_string(),
+            status: StatusCode::BAD_REQUEST,
+        });
+        let lock_not_found = anyhow!(PregameApiError::AgentAction {
+            action: "lock".to_string(),
+            status: StatusCode::NOT_FOUND,
+        });
+        let lock_forbidden = anyhow!(PregameApiError::AgentAction {
+            action: "lock".to_string(),
+            status: StatusCode::FORBIDDEN,
+        });
 
-        assert!(is_transient_pregame_error(&not_found));
-        assert!(!is_transient_pregame_error(&forbidden));
+        assert!(is_transient_pregame_error(&match_not_found));
+        assert!(!is_transient_pregame_error(&match_bad_request));
+        assert!(is_transient_pregame_error(&lock_bad_request));
+        assert!(is_transient_pregame_error(&lock_not_found));
+        assert!(!is_transient_pregame_error(&lock_forbidden));
     }
 
     #[test]

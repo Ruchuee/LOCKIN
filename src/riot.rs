@@ -254,9 +254,12 @@ pub enum PregameApiError {
 impl PregameApiError {
     pub fn is_transient(&self) -> bool {
         match self {
-            PregameApiError::PlayerRequest(status)
-            | PregameApiError::MatchRequest(status)
-            | PregameApiError::AgentAction { status, .. } => *status == StatusCode::NOT_FOUND,
+            PregameApiError::PlayerRequest(status) | PregameApiError::MatchRequest(status) => {
+                *status == StatusCode::NOT_FOUND
+            }
+            PregameApiError::AgentAction { status, .. } => {
+                matches!(*status, StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST)
+            }
         }
     }
 }
