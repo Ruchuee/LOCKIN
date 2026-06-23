@@ -1,4 +1,5 @@
 {
+  "selection_mode": "global",
   "selected_agent_uuid": "df1cb487-4902-002e-5c17-d28e83e78588",
   "selected_map_urls": [
     "/Game/Maps/Ascent/Ascent",
@@ -7,6 +8,7 @@
     "/Game/Maps/Jam/Jam",
     "/Game/Maps/Bonsai/Bonsai"
   ],
+  "per_map_agent_uuids": {},
   "select_before_lock": true,
   "auto_rearm": true,
   "poll_ms": 250,
